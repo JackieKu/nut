@@ -166,7 +166,7 @@ void listen_add(const char *addr, const char *port)
 	/* grab some memory and add the info */
 	server = xcalloc(1, sizeof(*server));
 	server->addr = xstrdup(addr);
-	server->port = xstrdup(port);
+	server->port = addr[0] != '/' ? xstrdup(port) : NULL;
 	server->sock_fd = -1;
 	server->next = firstaddr;
 
@@ -175,6 +175,7 @@ void listen_add(const char *addr, const char *port)
 	upsdebugx(3, "listen_add: added %s:%s", server->addr, server->port);
 }
 
+static char listening = 0;
 /* create a listening socket for tcp connections */
 static void setuptcp(stype_t *server)
 {
@@ -241,9 +242,53 @@ static void setuptcp(stype_t *server)
 		upslogx(LOG_ERR, "not listening on %s port %s", server->addr, server->port);
 	} else {
 		upslogx(LOG_INFO, "listening on %s port %s", server->addr, server->port);
+		listening = 1;
 	}
 
 	return;
+}
+
+/* create a listening socket for unix domain connections */
+static void setup_local_socket(stype_t *server)
+{
+	struct sockaddr_un addr;
+	int	v = 0, one = 1;
+	int sock_fd = -1;
+
+	if ((sock_fd = socket(AF_UNIX, SOCK_STREAM, 0)) < 0) {
+		fatal_with_errno(EXIT_FAILURE, "setup_local_socket: socket");
+	}
+
+	unlink(server->addr);
+
+	addr.sun_family = AF_UNIX;
+	strncpy(addr.sun_path, server->addr, sizeof(addr.sun_path));
+	if (bind(sock_fd, &addr, sizeof(addr)) < 0) {
+		fatal_with_errno(EXIT_FAILURE, "setup_local_socket: bind");
+	}
+
+	if ((v = fcntl(sock_fd, F_GETFL, 0)) == -1) {
+		fatal_with_errno(EXIT_FAILURE, "setup_local_socket: fcntl(get)");
+	}
+
+	if (fcntl(sock_fd, F_SETFL, v | O_NONBLOCK) == -1) {
+		fatal_with_errno(EXIT_FAILURE, "setup_local_socket: fcntl(set)");
+	}
+
+	if (listen(sock_fd, 16) < 0) {
+		fatal_with_errno(EXIT_FAILURE, "setup_local_socket: listen");
+	}
+
+	server->sock_fd = sock_fd;
+
+	/* leave up to the caller, server_load(), to fail silently if there is
+	 * no other valid LISTEN interface */
+	if (server->sock_fd < 0) {
+		upslogx(LOG_ERR, "not listening on %s", server->addr);
+	} else {
+		upslogx(LOG_INFO, "listening on %s", server->addr);
+		listening = 1;
+	}
 }
 
 /* decrement the login counter for this ups */
@@ -415,6 +460,7 @@ static void check_command(int cmdnum, nut_ctype_t *client, int numarg,
 		}
 
 #ifdef HAVE_WRAP
+		if (client->addr[0] != '/') {
 		request_init(&req, RQ_DAEMON, progname, RQ_FILE, client->sock_fd, RQ_USER, client->username, 0);
 		fromhost(&req);
 
@@ -422,6 +468,7 @@ static void check_command(int cmdnum, nut_ctype_t *client, int numarg,
 			/* tcp-wrappers says access should be denied */
 			send_err(client, NUT_ERR_ACCESS_DENIED);
 			return;
+		}
 		}
 #endif	/* HAVE_WRAP */
 	}
@@ -478,7 +525,7 @@ static void client_connect(stype_t *server)
 
 	time(&client->last_heard);
 
-	client->addr = xstrdup(inet_ntopW(&csock));
+	client->addr = server->addr[0] != '/' ? xstrdup(inet_ntopW(&csock)) : NULL;
 
 	pconf_init(&client->ctx, NULL);
 
@@ -497,7 +544,7 @@ static void client_connect(stype_t *server)
 
 	lastclient = client;
  */
-	upsdebugx(2, "Connect from %s", client->addr);
+	upsdebugx(2, "Connect from %s", client->addr ? client->addr : "LOCAL");
 }
 
 /* read tcp messages and handle them */
@@ -567,11 +614,27 @@ void server_load(void)
 	}
 
 	for (server = firstaddr; server; server = server->next) {
-		setuptcp(server);
+		if (server->addr[0] != '/')
+			setuptcp(server);
 	}
-	
+}
+
+void server_load_local(void)
+{
+	stype_t	*server;
+	mode_t old_mask;
+
+	old_mask = umask(0117);
+
+	for (server = firstaddr; server; server = server->next) {
+		if (server->addr[0] == '/')
+			setup_local_socket(server);
+	}
+
+	umask(old_mask);
+
 	/* check if we have at least 1 valid LISTEN interface */
-	if (firstaddr->sock_fd < 0) {
+	if (!listening) {
 		fatalx(EXIT_FAILURE, "no listening interface available");
 	}
 }
@@ -1012,6 +1075,9 @@ int main(int argc, char **argv)
 
 	/* check statepath perms */
 	check_perms(statepath);
+
+	/* start local server (with non-root user) */
+	server_load_local();
 
 	/* handle ups.conf */
 	read_upsconf();
