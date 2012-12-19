@@ -178,6 +178,7 @@ sub _initialize {
   $self->{debugout} = $arg{DEBUGOUT} || undef; # where to send debug messages
 
   my $srvsock = $self->{srvsock} = # establish connection to upsd
+    substr($host, 0, 1) eq '/' ? IO::Socket::UNIX->new($host) :
     IO::Socket::INET->new(
       PeerAddr => $host, 
       PeerPort => $port,
