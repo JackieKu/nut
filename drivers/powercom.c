@@ -1005,11 +1005,14 @@ void upsdrv_initups(void)
 		if (!strcmp(modelname, "Unknown"))
 			modelname=buf;
 		upsdebugx(1,"Detected: %s , %dV",buf,linevoltage);
+		/* Test is disabled because it may lead to power pulse. */
+#if INIT_TEST
 		if (ser_send_char (upsfd, BATTERY_TEST) != 1) {
 			upslogx(LOG_NOTICE, "writing error");
 			dstate_datastale();
 			return;
 		}
+#endif
 	}
 	
 	upsdebugx(1, "Values of arguments:");
